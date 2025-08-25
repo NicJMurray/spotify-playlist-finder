@@ -112,7 +112,7 @@ def run_search(q: str) -> List[Dict]:
 
 # ----------------------- UI -----------------------
 st.title("Spotify Playlist Finder")
-st.write("Enter up to eight artists and eight songs; we’ll look for Spotify playlists likely containing them.")
+st.write("Enter up to eight artists and eight tracks.")
 
 # Simple Spotify‑style theming for link "buttons"
 st.markdown(
