@@ -39,9 +39,9 @@ st.write("Find Spotify playlists containing a given artist and/or song.")
 with st.form("inputs"):
     col1, col2 = st.columns(2)
     with col1:
-        artist = st.text_input("Artist (optional)", placeholder="e.g., Taylor Swift")
+        artist = st.text_input("Artist (optional)", placeholder="e.g., Kanye")
     with col2:
-        song = st.text_input("Song (optional)", placeholder="e.g., Cruel Summer")
+        song = st.text_input("Song (optional)", placeholder="e.g., Runaway")
     submitted = st.form_submit_button("Search")
 
 if submitted:
