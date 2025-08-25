@@ -6,17 +6,28 @@ import streamlit as st
 from duckduckgo_search import DDGS
 import httpx
 from dotenv import load_dotenv
+from pathlib import Path
+
+# ---- MUST BE THE FIRST STREAMLIT CALL ----
+st.set_page_config(page_title="Spotify Playlist Finder", page_icon="🎵", layout="centered")
+# ------------------------------------------
 
 # Load local .env for dev
 load_dotenv()
 
-# Read keys (prefer st.secrets if present, else .env)
+# Only read st.secrets if a secrets.toml exists (prevents the noisy warning)
+def secrets_available() -> bool:
+    home = Path.home() / ".streamlit" / "secrets.toml"
+    local = Path(".streamlit/secrets.toml")
+    return home.exists() or local.exists()
+
 def get_secret(key: str) -> str:
-    try:
-        if key in st.secrets:
-            return st.secrets[key]
-    except Exception:
-        pass
+    # Prefer Streamlit secrets if available; else environment (.env)
+    if secrets_available():
+        try:
+            return st.secrets.get(key, "")  # safe now; file exists
+        except Exception:
+            pass
     return os.getenv(key, "")
 
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY").strip()
@@ -97,7 +108,6 @@ def run_search(q: str) -> List[Dict]:
         return []
 
 # --- UI ---
-st.set_page_config(page_title="Spotify Playlist Finder", page_icon="🎵", layout="centered")
 st.title("🎵 Spotify Playlist Finder")
 st.write("Find Spotify playlists likely containing a given artist and/or song title.")
 
