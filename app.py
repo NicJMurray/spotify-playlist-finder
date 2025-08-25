@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 from typing import List, Dict
 import urllib.parse
@@ -41,7 +42,7 @@ def normalize_url(u: str) -> str:
         return ""
     try:
         p = urlparse(u)
-        # Google redirector: https://www.google.com/url?url=... (or q/u)
+        # Google redirector
         if p.netloc.endswith("google.com") and p.path.startswith("/url"):
             q = parse_qs(p.query)
             for key in ("url", "q", "u"):
@@ -52,7 +53,7 @@ def normalize_url(u: str) -> str:
         return u
 
 def canonical_spotify_url(u: str) -> str:
-    """Normalise Spotify playlist URLs for dedupe: strip /embed, querystring, trailing slash."""
+    """Normalise Spotify playlist URLs for dedupe."""
     try:
         u = normalize_url(u)
         p = urlparse(u)
@@ -88,46 +89,74 @@ def only_playlist_results(results: List[Dict]) -> List[Dict]:
         out.append({"title": title, "url": key, "snippet": snippet})
     return out
 
-# ----------------------- Google CSE (simple) -----------------------
+# ----------------------- Google CSE (simple + resilient) -----------------------
 def build_query(terms: List[str]) -> str:
     quoted = [f'"{t.strip()}"' for t in terms if t and t.strip()]
-    # With your CSE restricted to open.spotify.com this is enough; keep inurl to bias playlists.
-    return f'inurl:playlist {" ".join(quoted)}'.strip()
+    # Explicitly constrain via query
+    return f'site:{SPOTIFY_HOST} inurl:playlist {" ".join(quoted)}'.strip()
 
-def search_google_cse(q: str, max_results: int = 50) -> List[Dict]:
-    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
-        return []
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_google_cse_cached(q: str, page_start: int, page_size: int) -> Dict:
+    """Cached single-page call to CSE to avoid repeat hits on reruns."""
     url = "https://www.googleapis.com/customsearch/v1"
-    out: List[Dict] = []
-    start = 1
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": q,
+        "num": page_size,
+        "start": page_start,
+        "safe": "off",
+        "hl": "en",
+    }
     with httpx.Client(timeout=20) as client:
-        while len(out) < max_results and start <= 91:
-            params = {
-                "key": GOOGLE_API_KEY,
-                "cx": GOOGLE_CSE_ID,
-                "q": q,
-                "num": min(10, max_results - len(out)),
-                "start": start,
-                "safe": "off",
-                "hl": "en",
-            }
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("items", []) if isinstance(data, dict) else []
+        resp = client.get(url, params=params)
+        data = {}
+        try:
+            if resp.headers.get("content-type", "").startswith("application/json"):
+                data = resp.json()
+        except Exception:
+            data = {}
+        return {"status": resp.status_code, "headers": dict(resp.headers), "json": data}
+
+def search_google_cse(q: str, pages: int = 3, page_size: int = 10) -> List[Dict]:
+    """Fetch up to `pages` pages (defaults to 3 × 10 = 30 results)."""
+    out: List[Dict] = []
+    starts = [1 + i * page_size for i in range(max(1, pages))]
+    for start in starts:
+        res = search_google_cse_cached(q, page_start=start, page_size=page_size)
+        status = res["status"]
+        data = res["json"] if isinstance(res["json"], dict) else {}
+
+        if status == 200:
+            items = data.get("items", []) or []
             for it in items:
                 out.append({"title": it.get("title"), "url": it.get("link"), "snippet": it.get("snippet")})
-            if not items:
-                break
-            start += 10
-    return out[:max_results]
+            # be gentle between pages (uncached)
+            time.sleep(0.15)
+            continue
 
-def run_search(q: str, max_results: int = 50) -> List[Dict]:
-    return only_playlist_results(search_google_cse(q, max_results))
+        if status in (429, 403):
+            # Rate limit / quota: show a soft warning and stop
+            retry_after = res["headers"].get("Retry-After")
+            hint = "rate limit hit" if status == 429 else "quota or access denied"
+            msg = f"Google CSE {hint}. "
+            if retry_after:
+                msg += f"Retry-After: {retry_after}s. "
+            msg += "Open the query in Google or try again later."
+            st.warning(msg)
+            break
+
+        # Other status: stop quietly
+        break
+
+    return out
+
+def run_search(q: str, pages: int = 3) -> List[Dict]:
+    return only_playlist_results(search_google_cse(q, pages=pages))
 
 # ----------------------- UI -----------------------
 st.title("Spotify Playlist Finder")
-st.write("Enter up to eight terms (artist or song). We’ll look for Spotify playlists likely containing them.")
+st.write("Enter up to eight terms (artist or song).")  # trimmed as requested
 
 # Spotify-style button theming
 st.markdown(
@@ -187,7 +216,7 @@ if submitted:
         query = build_query(terms)
         st.caption(f"Query: `{query}`")
 
-        results = run_search(query, max_results=50)
+        results = run_search(query, pages=3)  # 3 pages (30 results max)
 
         if results:
             st.subheader("Matched playlists")
@@ -198,6 +227,6 @@ if submitted:
             st.markdown(btn_html, unsafe_allow_html=True)
             st.success(f"Found {len(results)} playlists.")
         else:
-            st.info("No results found via Google CSE.")
+            st.info("No results found right now.")
             google_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
             st.link_button("Open on Google", google_url)
