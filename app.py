@@ -1,4 +1,5 @@
 import os
+import re
 import random
 from pathlib import Path
 from typing import List, Dict
@@ -62,15 +63,41 @@ def normalize_url(u: str) -> str:
     except Exception:
         return u
 
+def canonical_spotify_url(u: str) -> str:
+    """Normalise Spotify playlist URLs for dedupe: strip /embed, strip query, strip trailing slash."""
+    try:
+        u = normalize_url(u)
+        p = urlparse(u)
+        if SPOTIFY_HOST not in p.netloc:
+            return u
+        path = p.path
+        if path.startswith("/embed/"):
+            path = path.replace("/embed", "", 1)  # /embed/playlist/... -> /playlist/...
+        path = path.rstrip("/")
+        return f"https://{SPOTIFY_HOST}{path}"
+    except Exception:
+        return u
+
 def only_playlist_results(results: List[Dict]) -> List[Dict]:
+    seen = set()
     filtered = []
     for r in results:
         raw_url = r.get("url") or r.get("link") or r.get("href") or ""
-        url = normalize_url(raw_url)
-        title = r.get("title") or r.get("name") or ""
+        url = canonical_spotify_url(raw_url)
+        title = (r.get("title") or r.get("name") or "") or url
         snippet = r.get("snippet") or r.get("body") or ""
-        if url and SPOTIFY_HOST in url and PLAYLIST_TOKEN in url:
-            filtered.append({"title": title or url, "url": url, "snippet": snippet})
+
+        if not url:
+            continue
+        p = urlparse(url)
+        if SPOTIFY_HOST not in p.netloc or PLAYLIST_TOKEN not in p.path:
+            continue
+
+        key = url.split("?", 1)[0]  # drop tracking params
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append({"title": title, "url": key, "snippet": snippet})
     return filtered
 
 # ----------------------- Search helpers -----------------------
@@ -82,7 +109,8 @@ def build_query(terms: List[str]) -> str:
 def search_duckduckgo(q: str, max_results: int = 40) -> List[Dict]:
     out = []
     with DDGS() as ddgs:
-        for r in ddgs.text(q, max_results=max_results):
+        # Be explicit about region/safesearch to maximise recall
+        for r in ddgs.text(q, region="uk-en", safesearch="off", max_results=max_results):
             out.append({"title": r.get("title"), "url": r.get("href"), "snippet": r.get("body")})
     return out
 
@@ -100,6 +128,13 @@ def search_google_cse(q: str, max_results: int = 40) -> List[Dict]:
                 "q": q,
                 "num": min(10, max_results - len(out)),
                 "start": start,
+                # Nudge CSE closer to what you see on google.com:
+                "safe": "off",
+                "hl": "en",
+                "gl": "uk",
+                "filter": 1,  # remove near duplicates
+                "siteSearch": SPOTIFY_HOST,       # hard include
+                "siteSearchFilter": "i",
             }
             resp = client.get(url, params=params)
             resp.raise_for_status()
@@ -112,22 +147,36 @@ def search_google_cse(q: str, max_results: int = 40) -> List[Dict]:
             start += 10
     return out[:max_results]
 
-def run_search(q: str) -> List[Dict]:
-    # Prefer Google CSE if configured, else DuckDuckGo
+def merge_unique(primary: List[Dict], secondary: List[Dict], limit: int) -> List[Dict]:
+    """Merge two result lists, de-duplicating by canonical Spotify URL."""
+    seen = {r["url"].split("?", 1)[0] for r in primary}
+    for r in secondary:
+        key = r["url"].split("?", 1)[0]
+        if key not in seen:
+            primary.append(r)
+            seen.add(key)
+        if len(primary) >= limit:
+            break
+    return primary[:limit]
+
+def run_search(q: str, max_results: int = 40) -> List[Dict]:
+    results: List[Dict] = []
+    # Try Google CSE first
     try:
         if GOOGLE_API_KEY and GOOGLE_CSE_ID:
-            res = search_google_cse(q)
-            if res:
-                return only_playlist_results(res)
+            results = only_playlist_results(search_google_cse(q, max_results))
     except Exception as e:
         st.info(f"Google CSE failed: {e}")
 
-    try:
-        res = search_duckduckgo(q)
-        return only_playlist_results(res)
-    except Exception as e:
-        st.info(f"DuckDuckGo failed: {e}")
-        return []
+    # Top up with DuckDuckGo if CSE is sparse
+    if len(results) < max_results:
+        try:
+            ddg = only_playlist_results(search_duckduckgo(q, max_results))
+            results = merge_unique(results, ddg, max_results)
+        except Exception as e:
+            st.info(f"DuckDuckGo failed: {e}")
+
+    return results[:max_results]
 
 # ----------------------- UI -----------------------
 st.title("Spotify Playlist Finder")
@@ -194,11 +243,10 @@ if submitted:
         query = build_query(terms)
         st.caption(f"Query: `{query}`")
 
-        results = run_search(query)
+        results = run_search(query, max_results=40)
 
         if results:
             st.subheader("Matched playlists")
-            # Render as Spotify-style buttons in a fluid wrap
             btn_html = "".join(
                 f'<span class="btn-wrap"><a class="spotify-btn" href="{urllib.parse.quote(r["url"], safe=":/?&=%#")}" target="_blank" rel="noopener">{(r["title"] or "Open playlist")[:80]}</a></span>'
                 for r in results
