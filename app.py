@@ -1,13 +1,12 @@
 import os
-import re
 import random
 from pathlib import Path
 from typing import List, Dict
+from itertools import combinations
 import urllib.parse
 from urllib.parse import urlparse, parse_qs, unquote
 
 import streamlit as st
-from duckduckgo_search import DDGS
 import httpx
 from dotenv import load_dotenv
 
@@ -32,39 +31,31 @@ def get_secret(key: str) -> str:
             pass
     return os.getenv(key, "")
 
-GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY").strip()
-GOOGLE_CSE_ID  = get_secret("GOOGLE_CSE_ID").strip()
+GOOGLE_API_KEY = (get_secret("GOOGLE_API_KEY") or "").strip()
+GOOGLE_CSE_ID  = (get_secret("GOOGLE_CSE_ID") or "").strip()
 
 SPOTIFY_HOST = "open.spotify.com"
-PLAYLIST_TOKEN = "/playlist"  # also matches /embed/playlist
+PLAYLIST_TOKEN = "/playlist"  # also matches /user/.../playlist/... and /embed/playlist/...
 
 # ----------------------- URL normalisation & filters -----------------------
 def normalize_url(u: str) -> str:
-    """Unwrap common redirector links (DuckDuckGo, Google) to the real destination."""
+    """Unwrap common redirector links (Google) to the real destination."""
     if not u:
         return ""
     try:
         p = urlparse(u)
-
-        # DuckDuckGo redirector: https://duckduckgo.com/l/?uddg=<encoded>
-        if p.netloc.endswith("duckduckgo.com") and p.path.startswith("/l/"):
-            q = parse_qs(p.query)
-            if "uddg" in q and q["uddg"]:
-                return unquote(q["uddg"][0])
-
         # Google redirector: https://www.google.com/url?url=... (or q/u)
         if p.netloc.endswith("google.com") and p.path.startswith("/url"):
             q = parse_qs(p.query)
             for key in ("url", "q", "u"):
                 if key in q and q[key]:
                     return q[key][0]
-
         return u
     except Exception:
         return u
 
 def canonical_spotify_url(u: str) -> str:
-    """Normalise Spotify playlist URLs for dedupe: strip /embed, strip query, strip trailing slash."""
+    """Normalise Spotify playlist URLs for dedupe: strip /embed, querystring, trailing slash."""
     try:
         u = normalize_url(u)
         p = urlparse(u)
@@ -80,7 +71,7 @@ def canonical_spotify_url(u: str) -> str:
 
 def only_playlist_results(results: List[Dict]) -> List[Dict]:
     seen = set()
-    filtered = []
+    out = []
     for r in results:
         raw_url = r.get("url") or r.get("link") or r.get("href") or ""
         url = canonical_spotify_url(raw_url)
@@ -93,90 +84,110 @@ def only_playlist_results(results: List[Dict]) -> List[Dict]:
         if SPOTIFY_HOST not in p.netloc or PLAYLIST_TOKEN not in p.path:
             continue
 
-        key = url.split("?", 1)[0]  # drop tracking params
+        key = url.split("?", 1)[0]
         if key in seen:
             continue
         seen.add(key)
-        filtered.append({"title": title, "url": key, "snippet": snippet})
-    return filtered
-
-# ----------------------- Search helpers -----------------------
-def build_query(terms: List[str]) -> str:
-    quoted = [f'"{t.strip()}"' for t in terms if t and t.strip()]
-    base = f"site:{SPOTIFY_HOST} inurl:playlist"
-    return f"{base} {' '.join(quoted)}".strip()
-
-def search_duckduckgo(q: str, max_results: int = 40) -> List[Dict]:
-    out = []
-    with DDGS() as ddgs:
-        # Be explicit about region/safesearch to maximise recall
-        for r in ddgs.text(q, region="uk-en", safesearch="off", max_results=max_results):
-            out.append({"title": r.get("title"), "url": r.get("href"), "snippet": r.get("body")})
+        out.append({"title": title, "url": key, "snippet": snippet})
     return out
 
-def search_google_cse(q: str, max_results: int = 40) -> List[Dict]:
+# ----------------------- Google CSE helpers -----------------------
+def build_queries(terms: List[str]) -> List[str]:
+    """
+    Build multiple query variants to increase recall in CSE.
+    Strategy:
+      1) site: + inurl:playlist + all quoted terms
+      2) site: + intitle:playlist + all quoted terms
+      3) site: + all quoted terms + the word "playlist"
+      4) For ≥3 terms, pairwise combos with base pattern (helps when a page only surfaces two names)
+    """
+    t = [s.strip() for s in terms if s and s.strip()]
+    quoted_all = " ".join(f'"{s}"' for s in t)
+    base_site = f"site:{SPOTIFY_HOST}"
+
+    queries = []
+    queries.append(f'{base_site} inurl:playlist {quoted_all}'.strip())
+    queries.append(f'{base_site} intitle:playlist {quoted_all}'.strip())
+    queries.append(f'{base_site} {quoted_all} "playlist"'.strip())
+
+    if len(t) >= 3:
+        # cap number of pair queries to avoid excessive calls
+        for a, b in list(combinations(t, 2))[:10]:
+            queries.append(f'{base_site} inurl:playlist "{a}" "{b}"')
+
+    # de-dup while preserving order
+    seen = set()
+    uniq = []
+    for q in queries:
+        if q not in seen:
+            uniq.append(q); seen.add(q)
+    return uniq
+
+def google_cse_request(q: str, wanted: int = 40) -> List[Dict]:
+    """Fetch up to `wanted` results for a single query using pagination."""
     if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
         return []
+
     url = "https://www.googleapis.com/customsearch/v1"
-    out = []
+    out: List[Dict] = []
     start = 1
     with httpx.Client(timeout=20) as client:
-        while len(out) < max_results and start <= 91:
+        while len(out) < wanted and start <= 91:
             params = {
                 "key": GOOGLE_API_KEY,
                 "cx": GOOGLE_CSE_ID,
                 "q": q,
-                "num": min(10, max_results - len(out)),
+                "num": min(10, wanted - len(out)),
                 "start": start,
-                # Nudge CSE closer to what you see on google.com:
+                # Nudges to align with google.com behaviour
                 "safe": "off",
                 "hl": "en",
                 "gl": "uk",
-                "filter": 1,  # remove near duplicates
-                "siteSearch": SPOTIFY_HOST,       # hard include
+                "filter": 1,
+                # Hard include host (works even if your CSE is "entire web"):
+                "siteSearch": SPOTIFY_HOST,
                 "siteSearchFilter": "i",
             }
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+            try:
+                resp = client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                st.info(f"CSE error at start={start}: {e}")
+                break
+
             items = data.get("items", []) if isinstance(data, dict) else []
             for it in items:
-                out.append({"title": it.get("title"), "url": it.get("link"), "snippet": it.get("snippet")})
+                out.append({
+                    "title": it.get("title"),
+                    "url": it.get("link"),
+                    "snippet": it.get("snippet"),
+                })
+
             if not items:
                 break
             start += 10
-    return out[:max_results]
 
-def merge_unique(primary: List[Dict], secondary: List[Dict], limit: int) -> List[Dict]:
-    """Merge two result lists, de-duplicating by canonical Spotify URL."""
-    seen = {r["url"].split("?", 1)[0] for r in primary}
-    for r in secondary:
-        key = r["url"].split("?", 1)[0]
-        if key not in seen:
-            primary.append(r)
-            seen.add(key)
-        if len(primary) >= limit:
-            break
-    return primary[:limit]
+    return out[:wanted]
 
-def run_search(q: str, max_results: int = 40) -> List[Dict]:
-    results: List[Dict] = []
-    # Try Google CSE first
-    try:
-        if GOOGLE_API_KEY and GOOGLE_CSE_ID:
-            results = only_playlist_results(search_google_cse(q, max_results))
-    except Exception as e:
-        st.info(f"Google CSE failed: {e}")
+def run_google_only(terms: List[str], max_results: int = 50) -> List[Dict]:
+    """Run multiple CSE query variants and merge/dedupe results."""
+    queries = build_queries(terms)
+    merged: List[Dict] = []
+    seen_urls = set()
 
-    # Top up with DuckDuckGo if CSE is sparse
-    if len(results) < max_results:
-        try:
-            ddg = only_playlist_results(search_duckduckgo(q, max_results))
-            results = merge_unique(results, ddg, max_results)
-        except Exception as e:
-            st.info(f"DuckDuckGo failed: {e}")
-
-    return results[:max_results]
+    for q in queries:
+        raw = google_cse_request(q, wanted=50)  # fetch up to 50 per variant
+        filt = only_playlist_results(raw)
+        for r in filt:
+            key = r["url"]
+            if key in seen_urls:
+                continue
+            merged.append(r)
+            seen_urls.add(key)
+            if len(merged) >= max_results:
+                return merged
+    return merged[:max_results]
 
 # ----------------------- UI -----------------------
 st.title("Spotify Playlist Finder")
@@ -240,10 +251,11 @@ if submitted:
     if not terms:
         st.warning("Please enter at least one term.")
     else:
-        query = build_query(terms)
-        st.caption(f"Query: `{query}`")
+        # Show the primary query for transparency
+        primary_query_preview = f'site:{SPOTIFY_HOST} inurl:playlist ' + " ".join(f'"{t}"' for t in terms)
+        st.caption(f"Primary query: `{primary_query_preview}`")
 
-        results = run_search(query, max_results=40)
+        results = run_google_only(terms, max_results=60)
 
         if results:
             st.subheader("Matched playlists")
@@ -254,6 +266,6 @@ if submitted:
             st.markdown(btn_html, unsafe_allow_html=True)
             st.success(f"Found {len(results)} playlists.")
         else:
-            st.info("No results found via configured backends.")
-            google_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+            st.info("No results found via Google CSE.")
+            google_url = "https://www.google.com/search?q=" + urllib.parse.quote(primary_query_preview)
             st.link_button("Open on Google", google_url)
