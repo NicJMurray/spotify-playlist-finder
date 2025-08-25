@@ -1,3 +1,2 @@
 [server]
-baseUrlPath = "playlist-finder"
-headless = true
+address = "0.0.0.0"
