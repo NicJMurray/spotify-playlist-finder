@@ -1,0 +1,3 @@
+[server]
+baseUrlPath = "playlist-finder"
+headless = true
