@@ -1,8 +1,9 @@
 import os
-from pathlib import Path
-import urllib.parse
-from typing import List, Dict
 import random
+from pathlib import Path
+from typing import List, Dict
+import urllib.parse
+from urllib.parse import urlparse, parse_qs, unquote
 
 import streamlit as st
 from duckduckgo_search import DDGS
@@ -31,26 +32,52 @@ def get_secret(key: str) -> str:
     return os.getenv(key, "")
 
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY").strip()
-GOOGLE_CSE_ID = get_secret("GOOGLE_CSE_ID").strip()
+GOOGLE_CSE_ID  = get_secret("GOOGLE_CSE_ID").strip()
 
-SPOTIFY_PLAYLIST_HOST = "open.spotify.com"
-SPOTIFY_PLAYLIST_PATH = "/playlist/"
+SPOTIFY_HOST = "open.spotify.com"
+PLAYLIST_TOKEN = "/playlist"  # also matches /embed/playlist
 
-# ----------------------- Search helpers -----------------------
-def build_query(terms: List[str]) -> str:
-    quoted = [f'"{t.strip()}"' for t in terms if t and t.strip()]
-    base = f"site:{SPOTIFY_PLAYLIST_HOST} inurl:playlist"
-    return f"{base} {' '.join(quoted)}".strip()
+# ----------------------- URL normalisation & filters -----------------------
+def normalize_url(u: str) -> str:
+    """Unwrap common redirector links (DuckDuckGo, Google) to the real destination."""
+    if not u:
+        return ""
+    try:
+        p = urlparse(u)
+
+        # DuckDuckGo redirector: https://duckduckgo.com/l/?uddg=<encoded>
+        if p.netloc.endswith("duckduckgo.com") and p.path.startswith("/l/"):
+            q = parse_qs(p.query)
+            if "uddg" in q and q["uddg"]:
+                return unquote(q["uddg"][0])
+
+        # Google redirector: https://www.google.com/url?url=... (or q/u)
+        if p.netloc.endswith("google.com") and p.path.startswith("/url"):
+            q = parse_qs(p.query)
+            for key in ("url", "q", "u"):
+                if key in q and q[key]:
+                    return q[key][0]
+
+        return u
+    except Exception:
+        return u
 
 def only_playlist_results(results: List[Dict]) -> List[Dict]:
     filtered = []
     for r in results:
-        url = r.get("url") or r.get("link") or r.get("href")
+        raw_url = r.get("url") or r.get("link") or r.get("href") or ""
+        url = normalize_url(raw_url)
         title = r.get("title") or r.get("name") or ""
         snippet = r.get("snippet") or r.get("body") or ""
-        if url and SPOTIFY_PLAYLIST_HOST in url and SPOTIFY_PLAYLIST_PATH in url:
+        if url and SPOTIFY_HOST in url and PLAYLIST_TOKEN in url:
             filtered.append({"title": title or url, "url": url, "snippet": snippet})
     return filtered
+
+# ----------------------- Search helpers -----------------------
+def build_query(terms: List[str]) -> str:
+    quoted = [f'"{t.strip()}"' for t in terms if t and t.strip()]
+    base = f"site:{SPOTIFY_HOST} inurl:playlist"
+    return f"{base} {' '.join(quoted)}".strip()
 
 def search_duckduckgo(q: str, max_results: int = 40) -> List[Dict]:
     out = []
@@ -106,7 +133,7 @@ def run_search(q: str) -> List[Dict]:
 st.title("Spotify Playlist Finder")
 st.write("Enter up to eight terms (artist or song). We’ll look for Spotify playlists likely containing them.")
 
-# Simple Spotify‑style theming for link "buttons"
+# Spotify‑style button theming
 st.markdown(
     """
     <style>
@@ -132,20 +159,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Randomise placeholders across the 8 boxes
+# Randomised placeholders for the 8 boxes
 examples = ["Kanye", "Jamie XX", "Deki Alem", "Favourite", "CASisDEAD", "Capricorn", "Starburster", "Eusexua"]
 placeholders = random.sample(examples, k=len(examples))
 
 with st.form("inputs"):
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown('<div class="grid-label">Left column</div>', unsafe_allow_html=True)
+        st.markdown('<div class="grid-label">Artist or Song</div>', unsafe_allow_html=True)
         term1 = st.text_input("Term 1", placeholder=placeholders[0])
         term2 = st.text_input("Term 2", placeholder=placeholders[1])
         term3 = st.text_input("Term 3", placeholder=placeholders[2])
         term4 = st.text_input("Term 4", placeholder=placeholders[3])
     with c2:
-        st.markdown('<div class="grid-label">Right column</div>', unsafe_allow_html=True)
+        st.markdown('<div class="grid-label"> </div>', unsafe_allow_html=True)
         term5 = st.text_input("Term 5", placeholder=placeholders[4])
         term6 = st.text_input("Term 6", placeholder=placeholders[5])
         term7 = st.text_input("Term 7", placeholder=placeholders[6])
