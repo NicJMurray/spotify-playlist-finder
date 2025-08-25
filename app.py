@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import urllib.parse
 from typing import List, Dict
+import random
 
 import streamlit as st
 from duckduckgo_search import DDGS
@@ -36,19 +37,10 @@ SPOTIFY_PLAYLIST_HOST = "open.spotify.com"
 SPOTIFY_PLAYLIST_PATH = "/playlist/"
 
 # ----------------------- Search helpers -----------------------
-def build_query(artists: List[str], songs: List[str]) -> str:
-    terms: List[str] = []
-    for a in artists:
-        a = a.strip()
-        if a:
-            terms.append(f'"{a}"')
-    for s in songs:
-        s = s.strip()
-        if s:
-            terms.append(f'"{s}"')
-    term_str = " ".join(terms)
+def build_query(terms: List[str]) -> str:
+    quoted = [f'"{t.strip()}"' for t in terms if t and t.strip()]
     base = f"site:{SPOTIFY_PLAYLIST_HOST} inurl:playlist"
-    return f"{base} {term_str}".strip()
+    return f"{base} {' '.join(quoted)}".strip()
 
 def only_playlist_results(results: List[Dict]) -> List[Dict]:
     filtered = []
@@ -112,7 +104,7 @@ def run_search(q: str) -> List[Dict]:
 
 # ----------------------- UI -----------------------
 st.title("Spotify Playlist Finder")
-st.write("Enter up to eight artists and eight tracks.")
+st.write("Enter up to eight terms (artist or song). We’ll look for Spotify playlists likely containing them.")
 
 # Simple Spotify‑style theming for link "buttons"
 st.markdown(
@@ -134,48 +126,40 @@ st.markdown(
       .spotify-btn:hover { background: #1ed760; }
       .spotify-btn:active { transform: scale(0.98); }
       .btn-wrap { margin: 0.25rem 0.35rem 0.25rem 0; display: inline-block; }
+      .grid-label { font-weight: 600; margin-bottom: 0.5rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# Randomise placeholders across the 8 boxes
+examples = ["Kanye", "Jamie XX", "Deki Alem", "Favourite", "CASisDEAD", "Capricorn", "Starburster", "Eusexua"]
+placeholders = random.sample(examples, k=len(examples))
+
 with st.form("inputs"):
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Artists")
-        artists = [
-            st.text_input("Artist 1", placeholder="Kanye West"),
-            st.text_input("Artist 2", placeholder=""),
-            st.text_input("Artist 3", placeholder=""),
-            st.text_input("Artist 4", placeholder=""),
-            st.text_input("Artist 5", placeholder=""),
-            st.text_input("Artist 6", placeholder=""),
-            st.text_input("Artist 7", placeholder=""),
-            st.text_input("Artist 8", placeholder=""),
-        ]
+        st.markdown('<div class="grid-label">Left column</div>', unsafe_allow_html=True)
+        term1 = st.text_input("Term 1", placeholder=placeholders[0])
+        term2 = st.text_input("Term 2", placeholder=placeholders[1])
+        term3 = st.text_input("Term 3", placeholder=placeholders[2])
+        term4 = st.text_input("Term 4", placeholder=placeholders[3])
     with c2:
-        st.subheader("Songs")
-        songs = [
-            st.text_input("Song 1", placeholder="Runaway"),
-            st.text_input("Song 2", placeholder=""),
-            st.text_input("Song 3", placeholder=""),
-            st.text_input("Song 4", placeholder=""),
-            st.text_input("Song 5", placeholder=""),
-            st.text_input("Song 6", placeholder=""),
-            st.text_input("Song 7", placeholder=""),
-            st.text_input("Song 8", placeholder=""),
-        ]
+        st.markdown('<div class="grid-label">Right column</div>', unsafe_allow_html=True)
+        term5 = st.text_input("Term 5", placeholder=placeholders[4])
+        term6 = st.text_input("Term 6", placeholder=placeholders[5])
+        term7 = st.text_input("Term 7", placeholder=placeholders[6])
+        term8 = st.text_input("Term 8", placeholder=placeholders[7])
+
     submitted = st.form_submit_button("Search")
 
 if submitted:
-    # Filter out blanks
-    artists_filled = [a for a in artists if a.strip()]
-    songs_filled   = [s for s in songs if s.strip()]
+    terms = [t for t in [term1, term2, term3, term4, term5, term6, term7, term8] if t and t.strip()]
 
-    if not artists_filled and not songs_filled:
-        st.warning("Please enter at least one artist or one song.")
+    if not terms:
+        st.warning("Please enter at least one term.")
     else:
-        query = build_query(artists_filled, songs_filled)
+        query = build_query(terms)
         st.caption(f"Query: `{query}`")
 
         results = run_search(query)
