@@ -133,7 +133,7 @@ def run_search(q: str) -> List[Dict]:
 st.title("Spotify Playlist Finder")
 st.write("Enter up to eight terms (artist or song). We’ll look for Spotify playlists likely containing them.")
 
-# Spotify‑style button theming
+# Spotify-style button theming
 st.markdown(
     """
     <style>
@@ -153,35 +153,40 @@ st.markdown(
       .spotify-btn:hover { background: #1ed760; }
       .spotify-btn:active { transform: scale(0.98); }
       .btn-wrap { margin: 0.25rem 0.35rem 0.25rem 0; display: inline-block; }
-      .grid-label { font-weight: 600; margin-bottom: 0.5rem; }
+      .grid-label { font-weight: 600; margin: 0.5rem 0 0.25rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Randomised placeholders for the 8 boxes
+# Randomised placeholders for the 8 boxes (stable across reruns)
 examples = ["Kanye", "Jamie XX", "Deki Alem", "Favourite", "CASisDEAD", "Capricorn", "Starburster", "Eusexua"]
-placeholders = random.sample(examples, k=len(examples))
+if "placeholders" not in st.session_state:
+    st.session_state.placeholders = random.sample(examples, k=len(examples))
+placeholders = st.session_state.placeholders
+
+# Shared heading for both columns
+st.markdown('<div class="grid-label">Artist or song</div>', unsafe_allow_html=True)
 
 with st.form("inputs"):
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown('<div class="grid-label">Artist or Song</div>', unsafe_allow_html=True)
-        term1 = st.text_input("Term 1", placeholder=placeholders[0])
-        term2 = st.text_input("Term 2", placeholder=placeholders[1])
-        term3 = st.text_input("Term 3", placeholder=placeholders[2])
-        term4 = st.text_input("Term 4", placeholder=placeholders[3])
+        term1 = st.text_input("Term 1", placeholder=placeholders[0], key="term_1")
+        term2 = st.text_input("Term 2", placeholder=placeholders[1], key="term_2")
+        term3 = st.text_input("Term 3", placeholder=placeholders[2], key="term_3")
+        term4 = st.text_input("Term 4", placeholder=placeholders[3], key="term_4")
     with c2:
-        st.markdown('<div class="grid-label"> </div>', unsafe_allow_html=True)
-        term5 = st.text_input("Term 5", placeholder=placeholders[4])
-        term6 = st.text_input("Term 6", placeholder=placeholders[5])
-        term7 = st.text_input("Term 7", placeholder=placeholders[6])
-        term8 = st.text_input("Term 8", placeholder=placeholders[7])
+        term5 = st.text_input("Term 5", placeholder=placeholders[4], key="term_5")
+        term6 = st.text_input("Term 6", placeholder=placeholders[5], key="term_6")
+        term7 = st.text_input("Term 7", placeholder=placeholders[6], key="term_7")
+        term8 = st.text_input("Term 8", placeholder=placeholders[7], key="term_8")
 
     submitted = st.form_submit_button("Search")
 
 if submitted:
-    terms = [t for t in [term1, term2, term3, term4, term5, term6, term7, term8] if t and t.strip()]
+    # Read from session_state to avoid transient empty reads on rerun
+    terms = [st.session_state.get(f"term_{i}", "").strip() for i in range(1, 9)]
+    terms = [t for t in terms if t]
 
     if not terms:
         st.warning("Please enter at least one term.")
@@ -193,7 +198,7 @@ if submitted:
 
         if results:
             st.subheader("Matched playlists")
-            # Render as Spotify‑style buttons in a fluid wrap
+            # Render as Spotify-style buttons in a fluid wrap
             btn_html = "".join(
                 f'<span class="btn-wrap"><a class="spotify-btn" href="{urllib.parse.quote(r["url"], safe=":/?&=%#")}" target="_blank" rel="noopener">{(r["title"] or "Open playlist")[:80]}</a></span>'
                 for r in results
